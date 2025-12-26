@@ -18,11 +18,16 @@ package controller
 
 import (
 	"context"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	// logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	infrav1alpha1 "github.com/omar--triguii/ec2-operator/api/v1alpha1"
 )
@@ -47,9 +52,71 @@ type EC2InstanceReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.4/pkg/reconcile
 func (r *EC2InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	var cr infrav1alpha1.EC2Instance
+	const ec2Finalizer = "infra.trigui.com/ec2instance-finalizer"
 
-	// TODO(user): your logic here
+	if err := r.Get(ctx, req.NamespacedName, &cr); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	// ✅ ADD THIS BLOCK RIGHT HERE (after Get)
+	if !cr.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&cr, ec2Finalizer) {
+			if cr.Status.InstanceID != "" {
+				cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cr.Spec.Region))
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				ec2c := ec2.NewFromConfig(cfg)
+
+				_, err = ec2c.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
+					InstanceIds: []string{cr.Status.InstanceID},
+				})
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+
+			controllerutil.RemoveFinalizer(&cr, ec2Finalizer)
+			if err := r.Update(ctx, &cr); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+	// ✅ ADD THIS BLOCK RIGHT HERE (before creation logic)
+	if !controllerutil.ContainsFinalizer(&cr, ec2Finalizer) {
+		controllerutil.AddFinalizer(&cr, ec2Finalizer)
+		if err := r.Update(ctx, &cr); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Creation-only: if already created, do nothing
+	if cr.Status.InstanceID != "" {
+		return ctrl.Result{}, nil
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cr.Spec.Region))
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	ec2c := ec2.NewFromConfig(cfg)
+
+	out, err := ec2c.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId:      aws.String(cr.Spec.AmiID),
+		InstanceType: types.InstanceType(cr.Spec.InstanceType),
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	cr.Status.InstanceID = aws.ToString(out.Instances[0].InstanceId)
+	if err := r.Status().Update(ctx, &cr); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
 }

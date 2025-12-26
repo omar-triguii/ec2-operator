@@ -7,3 +7,6 @@ metadata:
   name: ec2instance-sample
 spec:
   # TODO(user): Add fields here
+  region: eu-west-3
+  amiId: ami-09593e6f738a812d5
+  instanceType: t3.micro
